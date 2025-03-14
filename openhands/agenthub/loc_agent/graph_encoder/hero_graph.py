@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Union
 from dataclasses import dataclass
 from enum import Enum
 import networkx as nx
@@ -52,6 +52,24 @@ class HeroGraph:
             edge_type: set() for edge_type in EdgeType
         }
         
+    def has_node(self, node_id: str) -> bool:
+        """Check if a node exists in the graph."""
+        return node_id in self.graph
+        
+    def has_edge(self, source_id: str, target_id: str) -> bool:
+        """Check if an edge exists in the graph."""
+        return self.graph.has_edge(source_id, target_id)
+        
+    @property
+    def nodes(self):
+        """Get all nodes in the graph."""
+        return self.graph.nodes
+        
+    @property
+    def edges(self):
+        """Get all edges in the graph."""
+        return self.graph.edges
+        
     def add_node(self, node: HeroNode) -> None:
         """Add a node to the graph with its type."""
         self.graph.add_node(node.id, **node.__dict__)
@@ -60,7 +78,10 @@ class HeroGraph:
     def add_edge(self, source_id: str, target_id: str, edge_type: EdgeType, 
                  metadata: Optional[Dict[str, Any]] = None) -> None:
         """Add an edge to the graph with its type and metadata."""
-        self.graph.add_edge(source_id, target_id, type=edge_type.value, **metadata or {})
+        edge_data = {'edge_type': edge_type.value}
+        if metadata:
+            edge_data.update(metadata)
+        self.graph.add_edge(source_id, target_id, **edge_data)
         self.edge_types[edge_type].add((source_id, target_id))
         
     def get_node(self, node_id: str) -> Optional[HeroNode]:
@@ -70,9 +91,15 @@ class HeroGraph:
             return HeroNode(**data)
         return None
         
-    def get_nodes_by_type(self, node_type: NodeType) -> List[HeroNode]:
-        """Get all nodes of a specific type."""
-        return [self.get_node(node_id) for node_id in self.node_types[node_type]]
+    def get_nodes_by_type(self, node_type: Union[NodeType, List[NodeType]]) -> List[HeroNode]:
+        """Get all nodes of a given type or types."""
+        if isinstance(node_type, list):
+            nodes = []
+            for ntype in node_type:
+                nodes.extend([self.get_node(node_id) for node_id in self.node_types.get(ntype, [])])
+            return nodes
+        else:
+            return [self.get_node(node_id) for node_id in self.node_types.get(node_type, [])]
         
     def get_edges_by_type(self, edge_type: EdgeType) -> List[tuple]:
         """Get all edges of a specific type."""
@@ -110,7 +137,7 @@ class HeroGraph:
                 
         # Update edge types
         for edge in subgraph.graph.edges(data=True):
-            edge_type = EdgeType(edge[2]['type'])
+            edge_type = EdgeType(edge[2]['edge_type'])
             subgraph.edge_types[edge_type].add((edge[0], edge[1]))
             
         return subgraph

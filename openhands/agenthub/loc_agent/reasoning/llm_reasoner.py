@@ -20,6 +20,7 @@ class LLMReasoner:
     
     def __init__(self, agent: Agent):
         self.agent = agent
+        self.logger = agent.logger
         self.prompt_templates = {
             'initial': """Given the following code locations and their context, analyze which ones are most relevant to the query.
 Query: {query}
@@ -54,39 +55,33 @@ Format your response as a JSON object with the following structure:
         }
         
     def reason(self, context: ReasoningContext) -> List[Dict[str, Any]]:
-        """Perform LLM-based reasoning about code locations."""
-        # Format initial locations
-        initial_locations_text = self._format_locations(context.initial_locations)
-        related_locations_text = self._format_locations(context.related_locations)
-        
-        # Generate initial prompt
-        prompt = self.prompt_templates['initial'].format(
-            query=context.query,
-            initial_locations=initial_locations_text,
-            related_locations=related_locations_text
-        )
-        
-        # Get LLM response
-        response = self.agent.llm.completion(
-            model="gpt-4",  # or other model as configured
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        
+        """Reason about code locations using LLM."""
         try:
-            # Parse response
-            results = json.loads(response.choices[0].message.content)
+            # Prepare prompt
+            prompt = self._prepare_prompt(context)
             
-            # If we have graph context, perform additional reasoning
-            if context.graph_context:
-                results = self._enhance_with_graph_context(results, context)
+            # Get LLM response
+            response = self.agent.llm.completion(
+                prompt=prompt,
+                max_tokens=1000,
+                temperature=0.7
+            )
+            
+            # Handle both string and object responses
+            if isinstance(response, str):
+                return json.loads(response)
+            elif hasattr(response, 'choices'):
+                content = response.choices[0].message.content
+                if isinstance(content, str):
+                    return json.loads(content)
+                return content
+            else:
+                raise ValueError("Unexpected LLM response format")
                 
-            return results
-            
-        except json.JSONDecodeError:
-            # Fallback to basic confidence scoring
+        except Exception as e:
+            self.logger.error(f"Error during LLM reasoning: {str(e)}")
             return self._fallback_reasoning(context)
-            
+        
     def _format_locations(self, locations: List[HeroNode]) -> str:
         """Format locations for prompt."""
         formatted = []
@@ -201,3 +196,20 @@ Format your response as a JSON object with the following structure:
                 })
                 
         return results 
+
+    def _prepare_prompt(self, context: ReasoningContext) -> str:
+        """Prepare the prompt for LLM reasoning."""
+        # Format initial locations
+        initial_locations_text = self._format_locations(context.initial_locations)
+        
+        # Format related locations
+        related_locations_text = self._format_locations(context.related_locations)
+        
+        # Generate initial prompt
+        prompt = self.prompt_templates['initial'].format(
+            query=context.query,
+            initial_locations=initial_locations_text,
+            related_locations=related_locations_text
+        )
+        
+        return prompt 

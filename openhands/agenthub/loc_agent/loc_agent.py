@@ -1,3 +1,4 @@
+import ast
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
@@ -9,7 +10,7 @@ from openhands.core.message import Message
 from openhands.events.action import Action, MessageAction, AgentFinishAction
 from openhands.llm.llm import LLM
 
-from .graph_encoder.hero_graph import HeroGraph, HeroNode
+from .graph_encoder.hero_graph import HeroGraph, HeroNode, NodeType, EdgeType
 from .reasoning import (
     LLMReasoner,
     ReasoningContext,
@@ -43,11 +44,19 @@ class LocAgent(Agent):
         """
         super().__init__(llm, config)
         
+        # Initialize logger
+        self.logger = logger
+        
         # Initialize components
         self.graph = HeroGraph()
         self.llm_reasoner = LLMReasoner(self)
+        self.reasoner = self.llm_reasoner
         self.graph_traverser = GraphTraverser(self.graph)
         self.dependency_tracker = DependencyTracker(self.graph)
+        
+        # Initialize state
+        from .mocks import State as MockState
+        self.state = MockState()
         
         # Initialize state
         self.reset()
@@ -59,80 +68,59 @@ class LocAgent(Agent):
         self.graph_traverser = GraphTraverser(self.graph)
         self.dependency_tracker = DependencyTracker(self.graph)
         
-    def step(self, state: State) -> Action:
-        """Perform one step of code localization.
+        # Initialize state
+        from .mocks import State as MockState
+        self.state = MockState()
         
-        Args:
-            state (State): Current state containing the query and context
-            
-        Returns:
-            Action: Next action to take
-        """
-        # Get the latest user message
-        latest_message = state.get_last_user_message()
-        if not latest_message:
-            return AgentFinishAction()
-            
-        # Extract query from message
-        query = latest_message.content
+    def step(self, state: Optional[State] = None) -> MessageAction:
+        """Take a step in the agent's execution."""
+        # Use provided state or current state
+        state = state or self.state
+        
+        # Get last user message
+        last_message = state.get_last_user_message()
+        if not last_message:
+            return MessageAction(content="No message found in state.")
         
         # Find initial locations
-        initial_locations = self._find_initial_locations(query)
+        initial_locations = self._find_initial_locations(last_message.content)
+        if not initial_locations:
+            return MessageAction(content="I couldn't find any relevant code locations for your query. Could you please provide more details or clarify your request?")
         
-        # Find related locations through graph traversal
+        # Find related locations
         related_locations = self.graph_traverser.find_related_locations(initial_locations)
         
         # Create reasoning context
         context = ReasoningContext(
-            query=query,
+            query=last_message.content,
             initial_locations=initial_locations,
             related_locations=related_locations,
             graph_context=self.graph
         )
         
-        # Perform LLM-based reasoning
+        # Get reasoning results
         results = self.llm_reasoner.reason(context)
         
-        # Process results
-        if not results:
-            return MessageAction(
-                content="I couldn't find any relevant code locations for your query. "
-                       "Could you please provide more details or clarify your request?"
-            )
-            
-        # Sort results by confidence
-        results.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        # Format response
+        # Format results
         response = self._format_localization_results(results)
+        
         return MessageAction(content=response)
         
     def _find_initial_locations(self, query: str) -> List[HeroNode]:
-        """Find initial code locations based on the query.
+        """Find initial code locations based on query."""
+        nodes = []
+        seen_ids = set()
         
-        Args:
-            query (str): The user's query
-            
-        Returns:
-            List[HeroNode]: List of initial code locations
-        """
-        # Extract keywords from query
-        keywords = query.lower().split()
+        # Search in function, class, and method nodes using individual query words
+        query_terms = query.lower().split()
+        for node_type in [NodeType.FUNCTION, NodeType.CLASS, NodeType.METHOD]:
+            for node in self.graph.get_nodes_by_type(node_type):
+                if node.id not in seen_ids:
+                    if any(term in node.name.lower() for term in query_terms):
+                        nodes.append(node)
+                        seen_ids.add(node.id)
         
-        # Search for nodes matching keywords
-        matching_nodes = []
-        for node in self.graph.graph.nodes(data=True):
-            node_data = node[1]
-            
-            # Check node name
-            if any(keyword in node_data['name'].lower() for keyword in keywords):
-                matching_nodes.append(self.graph.get_node(node[0]))
-                
-            # Check node content
-            if node_data.get('content') and any(keyword in node_data['content'].lower() for keyword in keywords):
-                matching_nodes.append(self.graph.get_node(node[0]))
-                
-        return matching_nodes
+        return nodes
         
     def _format_localization_results(self, results: List[Dict[str, Any]]) -> str:
         """Format localization results into a readable response.
@@ -190,33 +178,64 @@ class LocAgent(Agent):
             tree (ast.AST): The AST to process
             parent_node (HeroNode): Parent node in the graph
         """
-        for node in ast.walk(tree):
+        # First pass: collect all function definitions
+        function_nodes = []
+        for node in tree.body:
             if isinstance(node, ast.FunctionDef):
-                self._add_function_node(node, parent_node)
+                func_node = self._add_function_node(node, parent_node)
+                function_nodes.append((func_node, node))
             elif isinstance(node, ast.ClassDef):
                 self._add_class_node(node, parent_node)
             elif isinstance(node, ast.Import):
                 self._add_import_node(node, parent_node)
             elif isinstance(node, ast.ImportFrom):
                 self._add_import_from_node(node, parent_node)
-                
-    def _add_function_node(self, node: ast.FunctionDef, parent_node: HeroNode) -> None:
+        
+        # Second pass: add CALLS edges for function calls
+        for func_node, func_ast in function_nodes:
+            for child in ast.walk(func_ast):
+                if isinstance(child, ast.Call):
+                    # Handle direct function calls (e.g., helper())
+                    if isinstance(child.func, ast.Name):
+                        called_name = child.func.id
+                        target_id = f"{parent_node.id}.{called_name}"
+                        if self.graph.has_node(target_id):
+                            self.graph.add_edge(func_node.id, target_id, EdgeType.CALLS)
+                    # Handle method calls (e.g., obj.method())
+                    elif isinstance(child.func, ast.Attribute):
+                        method_name = child.func.attr
+                        if isinstance(child.func.value, ast.Name):
+                            obj_name = child.func.value.id
+                            target_id = f"{parent_node.id}.{obj_name}.{method_name}"
+                            if self.graph.has_node(target_id):
+                                self.graph.add_edge(func_node.id, target_id, EdgeType.CALLS)
+        
+    def _add_function_node(self, node: ast.FunctionDef, parent_node: HeroNode) -> HeroNode:
         """Add a function node to the graph.
         
         Args:
             node (ast.FunctionDef): The function AST node
             parent_node (HeroNode): Parent node in the graph
+            
+        Returns:
+            HeroNode: The created function node
         """
+        node_type = NodeType.METHOD if parent_node.type == NodeType.CLASS else NodeType.FUNCTION
         func_node = HeroNode(
             id=f"{parent_node.id}.{node.name}",
-            type=NodeType.FUNCTION,
+            type=node_type,
             name=node.name,
             content=ast.unparse(node),
             start_line=node.lineno,
             end_line=node.end_lineno
         )
-        self.graph.add_node(func_node)
-        self.graph.add_edge(parent_node.id, func_node.id, EdgeType.CONTAINS)
+        
+        # Only add the node if it doesn't already exist
+        if not self.graph.has_node(func_node.id):
+            self.graph.add_node(func_node)
+            self.graph.add_edge(parent_node.id, func_node.id, EdgeType.CONTAINS)
+            
+        return func_node
         
     def _add_class_node(self, node: ast.ClassDef, parent_node: HeroNode) -> None:
         """Add a class node to the graph.

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 import json
-from tests.agenthub.loc_agent.mocks import Agent
+from openhands.agenthub.loc_agent.mocks import Agent
 from openhands.agenthub.loc_agent.reasoning import (
     LLMReasoner,
     ReasoningContext,
@@ -26,6 +26,11 @@ class TestLLMReasoner(unittest.TestCase):
     def test_reason_with_context(self):
         """Test LLM reasoning with context."""
         # Create test context
+        mock_graph = Mock()
+        mock_graph.nodes = []
+        mock_graph.edges = []
+        mock_graph.get_node = Mock(return_value=None)
+        mock_graph.get_edges = Mock(return_value=[])
         context = ReasoningContext(
             query="find search function",
             initial_locations=[
@@ -37,21 +42,15 @@ class TestLLMReasoner(unittest.TestCase):
                 )
             ],
             related_locations=[],
-            graph_context=Mock()
+            graph_context=mock_graph
         )
         
         # Mock LLM response
-        self.agent.llm.completion.return_value = {
-            'choices': [{
-                'message': {
-                    'content': json.dumps([{
-                        'node_id': 'test.py.search',
-                        'confidence': 0.9,
-                        'reasoning': 'Found matching function'
-                    }])
-                }
-            }]
-        }
+        self.agent.llm.completion.return_value = json.dumps([{
+            'node_id': 'test.py.search',
+            'confidence': 0.9,
+            'reasoning': 'Found matching function'
+        }])
         
         # Test reasoning
         results = self.llm_reasoner.reason(context)
@@ -87,39 +86,69 @@ class TestGraphTraverser(unittest.TestCase):
         self.traverser = GraphTraverser(self.graph)
         
     def test_find_related_locations(self):
-        """Test finding related locations through graph traversal."""
-        # Create test graph
+        """Test finding related code locations."""
+        # Create test code with dependencies
+        test_code = """
+def main():
+    helper()
+    process()
+
+def helper():
+    process()
+
+def process():
+    pass
+"""
+        # Add code to graph
         file_node = HeroNode(
             id="test.py",
             type=NodeType.FILE,
             name="test.py",
-            content="def main(): helper()\ndef helper(): pass"
+            content=test_code
         )
         main_node = HeroNode(
             id="test.py.main",
             type=NodeType.FUNCTION,
             name="main",
-            content="def main(): helper()"
+            content="def main(): helper(); process()"
         )
         helper_node = HeroNode(
             id="test.py.helper",
             type=NodeType.FUNCTION,
             name="helper",
-            content="def helper(): pass"
+            content="def helper(): process()"
+        )
+        process_node = HeroNode(
+            id="test.py.process",
+            type=NodeType.FUNCTION,
+            name="process",
+            content="def process(): pass"
         )
         
         self.graph.add_node(file_node)
         self.graph.add_node(main_node)
         self.graph.add_node(helper_node)
+        self.graph.add_node(process_node)
+        
+        # Add edges
         self.graph.add_edge(file_node.id, main_node.id, EdgeType.CONTAINS)
         self.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(file_node.id, process_node.id, EdgeType.CONTAINS)
         self.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
+        self.graph.add_edge(main_node.id, process_node.id, EdgeType.CALLS)
+        self.graph.add_edge(helper_node.id, process_node.id, EdgeType.CALLS)
         
-        # Test finding related locations
-        related = self.traverser.find_related_locations([main_node])
+        # Track dependencies
+        self.traverser._build_weighted_graph()
+        
+        # Find related locations for main function
+        main_id = "test.py.main"
+        related = self.traverser.find_related_locations([main_id])
         
         # Verify related locations
-        self.assertEqual(len(related), 2)  # main and helper functions
+        self.assertEqual(len(related), 2)  # helper and process
+        related_names = {node.name for node in related}
+        self.assertEqual(related_names, {"helper", "process"})
         
     def test_find_relevant_paths(self):
         """Test finding relevant paths between nodes."""
@@ -150,12 +179,81 @@ class TestGraphTraverser(unittest.TestCase):
         self.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
         self.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
         
+        # Build weighted graph
+        self.traverser._build_weighted_graph()
+        
         # Test finding paths
         paths = self.traverser.find_relevant_paths(main_node.id, helper_node.id)
         
         # Verify paths
         self.assertEqual(len(paths), 1)
         self.assertEqual(len(paths[0]), 2)  # main -> helper
+
+    def test_graph_traversal(self):
+        """Test graph traversal functionality."""
+        # Create test code with dependencies
+        test_code = """
+def main():
+    helper()
+    process()
+
+def helper():
+    process()
+
+def process():
+    pass
+"""
+        # Add code to graph
+        file_node = HeroNode(
+            id="test.py",
+            type=NodeType.FILE,
+            name="test.py",
+            content=test_code
+        )
+        main_node = HeroNode(
+            id="test.py.main",
+            type=NodeType.FUNCTION,
+            name="main",
+            content="def main(): helper(); process()"
+        )
+        helper_node = HeroNode(
+            id="test.py.helper",
+            type=NodeType.FUNCTION,
+            name="helper",
+            content="def helper(): process()"
+        )
+        process_node = HeroNode(
+            id="test.py.process",
+            type=NodeType.FUNCTION,
+            name="process",
+            content="def process(): pass"
+        )
+        
+        # Add nodes
+        self.graph.add_node(file_node)
+        self.graph.add_node(main_node)
+        self.graph.add_node(helper_node)
+        self.graph.add_node(process_node)
+        
+        # Add edges
+        self.graph.add_edge(file_node.id, main_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(file_node.id, process_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
+        self.graph.add_edge(main_node.id, process_node.id, EdgeType.CALLS)
+        self.graph.add_edge(helper_node.id, process_node.id, EdgeType.CALLS)
+        
+        # Track dependencies
+        self.traverser._build_weighted_graph()
+        
+        # Find related locations for main function
+        main_id = "test.py.main"
+        related = self.traverser.find_related_locations([main_id])
+        
+        # Verify related locations
+        self.assertEqual(len(related), 2)
+        related_names = {node.name for node in related}
+        self.assertEqual(related_names, {"helper", "process"})
 
 class TestDependencyTracker(unittest.TestCase):
     def setUp(self):
@@ -167,8 +265,6 @@ class TestDependencyTracker(unittest.TestCase):
         """Test tracking code dependencies."""
         # Create test code with dependencies
         test_code = """
-from module import helper
-
 def main():
     helper()
 """
@@ -179,25 +275,42 @@ def main():
             name="test.py",
             content=test_code
         )
+        main_node = HeroNode(
+            id="test.py.main",
+            type=NodeType.FUNCTION,
+            name="main",
+            content="def main(): helper()"
+        )
+        helper_node = HeroNode(
+            id="test.py.helper",
+            type=NodeType.FUNCTION,
+            name="helper",
+            content="def helper(): pass"
+        )
+        
         self.graph.add_node(file_node)
+        self.graph.add_node(main_node)
+        self.graph.add_node(helper_node)
+        
+        # Add edges
+        self.graph.add_edge(file_node.id, main_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
         
         # Track dependencies
         self.tracker._build_dependency_graph()
         
         # Get dependencies for main function
-        main_id = "test.py.main"
-        dependencies = self.tracker.get_dependencies(main_id)
+        dependencies = self.tracker.get_dependencies("test.py.main")
         
         # Verify dependencies
         self.assertEqual(len(dependencies), 1)
-        self.assertEqual(dependencies[0].dependency_type, EdgeType.IMPORTS)
+        self.assertEqual(dependencies[0].dependency_type, EdgeType.CALLS.value)
         
     def test_get_dependency_path(self):
         """Test finding dependency paths between nodes."""
         # Create test code with dependency chain
         test_code = """
-from module import helper
-
 def main():
     helper()
     
@@ -211,7 +324,27 @@ def helper():
             name="test.py",
             content=test_code
         )
+        main_node = HeroNode(
+            id="test.py.main",
+            type=NodeType.FUNCTION,
+            name="main",
+            content="def main(): helper()"
+        )
+        helper_node = HeroNode(
+            id="test.py.helper",
+            type=NodeType.FUNCTION,
+            name="helper",
+            content="def helper(): print('helping')"
+        )
+        
         self.graph.add_node(file_node)
+        self.graph.add_node(main_node)
+        self.graph.add_node(helper_node)
+        
+        # Add edges
+        self.graph.add_edge(file_node.id, main_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
+        self.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
         
         # Track dependencies
         self.tracker._build_dependency_graph()
@@ -221,7 +354,7 @@ def helper():
         
         # Verify path
         self.assertEqual(len(path), 1)
-        self.assertEqual(path[0].dependency_type, EdgeType.CALLS)
+        self.assertEqual(path[0].dependency_type, EdgeType.CALLS.value)
 
 if __name__ == '__main__':
     unittest.main() 

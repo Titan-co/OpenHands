@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Set, Optional
+from typing import List, Dict, Any, Set, Optional, Union
 from dataclasses import dataclass
 import networkx as nx
 
@@ -11,6 +11,7 @@ class TraversalConfig:
     min_confidence: float = 0.3
     edge_weights: Dict[EdgeType, float] = None
     node_type_weights: Dict[NodeType, float] = None
+    excluded_node_types: Set[NodeType] = None
     
     def __post_init__(self):
         # Default edge weights
@@ -39,6 +40,16 @@ class TraversalConfig:
                 NodeType.RETURN: 0.3,
                 NodeType.DECORATOR: 0.2
             }
+            
+        # Default excluded node types
+        if self.excluded_node_types is None:
+            self.excluded_node_types = {
+                NodeType.FILE,
+                NodeType.IMPORT,
+                NodeType.PARAMETER,
+                NodeType.RETURN,
+                NodeType.DECORATOR
+            }
 
 class GraphTraverser:
     """Graph traversal for multi-hop reasoning in code localization."""
@@ -53,51 +64,89 @@ class GraphTraverser:
         self.weighted_graph = nx.DiGraph()
         
         # Add nodes with weights
-        for node in self.graph.graph.nodes(data=True):
-            node_type = NodeType(node[1]['type'])
-            weight = self.config.node_type_weights.get(node_type, 0.5)
-            self.weighted_graph.add_node(node[0], weight=weight, **node[1])
+        for node_id in self.graph.graph.nodes():
+            node_data = self.graph.graph.nodes[node_id]
+            node_type = NodeType(node_data['type'])
+            if node_type not in self.config.excluded_node_types:
+                weight = self.config.node_type_weights.get(node_type, 0.5)
+                self.weighted_graph.add_node(node_id, weight=weight, **node_data)
             
         # Add edges with weights
-        for edge in self.graph.graph.edges(data=True):
-            edge_type = EdgeType(edge[2]['type'])
-            weight = self.config.edge_weights.get(edge_type, 0.5)
-            self.weighted_graph.add_edge(edge[0], edge[1], weight=weight, **edge[2])
+        for source_id, target_id, edge_data in self.graph.graph.edges(data=True):
+            if source_id in self.weighted_graph and target_id in self.weighted_graph:
+                edge_type = EdgeType(edge_data['edge_type'])
+                weight = self.config.edge_weights.get(edge_type, 0.5)
+                self.weighted_graph.add_edge(source_id, target_id, weight=weight, **edge_data)
+                
+    def _filter_node(self, node_id: str) -> bool:
+        """Filter out nodes that should be excluded from traversal.
+        
+        Args:
+            node_id (str): ID of the node to check
             
-    def find_related_locations(self, initial_nodes: List[HeroNode]) -> List[HeroNode]:
-        """Find related locations through multi-hop traversal."""
+        Returns:
+            bool: True if node should be included, False otherwise
+        """
+        if node_id not in self.graph.graph:
+            return False
+            
+        node_data = self.graph.graph.nodes[node_id]
+        node_type = NodeType(node_data['type'])
+        return node_type not in self.config.excluded_node_types
+            
+    def find_related_locations(self, initial_nodes: Union[List[str], List[HeroNode]]) -> List[HeroNode]:
+        """Find related code locations through graph traversal."""
+        # Rebuild weighted graph
+        self._build_weighted_graph()
+        
+        # Add initial nodes to set
+        node_ids = set()
+        initial_node_ids = set()
+        for node in initial_nodes:
+            if isinstance(node, str):
+                node_ids.add(node)
+                initial_node_ids.add(node)
+            else:
+                node_ids.add(node.id)
+                initial_node_ids.add(node.id)
+                
+        visited = set()
         related_nodes = set()
         
-        # Add initial nodes
-        for node in initial_nodes:
-            related_nodes.add(node.id)
+        # Multi-hop traversal
+        for _ in range(self.config.max_hops):
+            current_nodes = list(node_ids - visited)
+            if not current_nodes:
+                break
+                
+            for node_id in current_nodes:
+                visited.add(node_id)
+                
+                # Forward traversal
+                for _, target_id in self.weighted_graph.edges(node_id):
+                    if target_id not in visited and target_id not in initial_node_ids:
+                        if self._filter_node(target_id):
+                            related_nodes.add(target_id)
+                        
+                # Backward traversal
+                for source_id, _ in self.weighted_graph.in_edges(node_id):
+                    if source_id not in visited and source_id not in initial_node_ids:
+                        if self._filter_node(source_id):
+                            related_nodes.add(source_id)
+                        
+            node_ids.update(related_nodes)
+            related_nodes.clear()
             
-        # Perform multi-hop traversal
-        for hop in range(self.config.max_hops):
-            new_nodes = set()
-            
-            # Traverse forward
-            for node_id in related_nodes:
-                for _, target_id, edge_data in self.weighted_graph.edges(node_id, data=True):
-                    if target_id not in related_nodes:
-                        # Calculate path weight
-                        path_weight = self._calculate_path_weight(node_id, target_id)
-                        if path_weight >= self.config.min_confidence:
-                            new_nodes.add(target_id)
-                            
-            # Traverse backward
-            for node_id in related_nodes:
-                for source_id, _, edge_data in self.weighted_graph.edges(None, node_id, data=True):
-                    if source_id not in related_nodes:
-                        # Calculate path weight
-                        path_weight = self._calculate_path_weight(source_id, node_id)
-                        if path_weight >= self.config.min_confidence:
-                            new_nodes.add(source_id)
-                            
-            related_nodes.update(new_nodes)
-            
-        # Convert node IDs to HeroNodes
-        return [self.graph.get_node(node_id) for node_id in related_nodes]
+        # Convert node IDs back to HeroNode objects, excluding file nodes and initial nodes
+        result_nodes = []
+        seen_ids = set()
+        for node_id in visited - initial_node_ids:
+            if node_id in self.graph.graph and node_id not in seen_ids:
+                if self._filter_node(node_id):
+                    result_nodes.append(self.graph.get_node(node_id))
+                    seen_ids.add(node_id)
+                    
+        return result_nodes
         
     def _calculate_path_weight(self, source_id: str, target_id: str) -> float:
         """Calculate the weight of a path between two nodes."""

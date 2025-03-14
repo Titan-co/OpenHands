@@ -48,7 +48,7 @@ class TestHeroGraph(unittest.TestCase):
         # Verify edge
         self.assertTrue(self.graph.has_edge(file_node.id, func_node.id))
         edge_data = self.graph.graph.get_edge_data(file_node.id, func_node.id)
-        self.assertEqual(edge_data['type'], EdgeType.CONTAINS)
+        self.assertEqual(edge_data['edge_type'], EdgeType.CONTAINS.value)
         
     def test_get_nodes_by_type(self):
         """Test retrieving nodes by type."""

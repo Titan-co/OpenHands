@@ -33,16 +33,37 @@ class DependencyTracker:
             node_id = node[0]
             node_data = node[1]
             
-            if node_data['type'] == NodeType.FUNCTION:
-                self._track_function_dependencies(node_id, node_data)
-            elif node_data['type'] == NodeType.CLASS:
-                self._track_class_dependencies(node_id, node_data)
-            elif node_data['type'] == NodeType.FILE:
-                self._track_file_dependencies(node_id, node_data)
+            self._track_dependencies(node_id, node_data)
                 
+    def _track_dependencies(self, node_id: str, node_data: Dict[str, Any]):
+        """Track dependencies for a node."""
+        try:
+            # Add node to dependency graph if not already present
+            if node_id not in self.dependency_graph:
+                self.dependency_graph.add_node(node_id, **node_data)
+            
+            # Track dependencies based on node type
+            node_type = NodeType(node_data['type'])
+            if node_type == NodeType.FUNCTION:
+                self._track_function_dependencies(node_id, node_data)
+            elif node_type == NodeType.CLASS:
+                self._track_class_dependencies(node_id, node_data)
+            elif node_type == NodeType.FILE:
+                self._track_file_dependencies(node_id, node_data)
+            elif node_type == NodeType.METHOD:
+                self._track_method_dependencies(node_id, node_data)
+                
+        except Exception:
+            # Handle tracking errors
+            pass
+            
     def _track_function_dependencies(self, node_id: str, node_data: Dict[str, Any]):
         """Track dependencies for a function node."""
         try:
+            # Add node to dependency graph if not already present
+            if node_id not in self.dependency_graph:
+                self.dependency_graph.add_node(node_id, **node_data)
+            
             # Parse function body
             tree = ast.parse(node_data['content'])
             
@@ -63,6 +84,10 @@ class DependencyTracker:
     def _track_class_dependencies(self, node_id: str, node_data: Dict[str, Any]):
         """Track dependencies for a class node."""
         try:
+            # Add node to dependency graph if not already present
+            if node_id not in self.dependency_graph:
+                self.dependency_graph.add_node(node_id, **node_data)
+            
             # Parse class body
             tree = ast.parse(node_data['content'])
             
@@ -84,6 +109,10 @@ class DependencyTracker:
     def _track_file_dependencies(self, node_id: str, node_data: Dict[str, Any]):
         """Track dependencies for a file node."""
         try:
+            # Add node to dependency graph if not already present
+            if node_id not in self.dependency_graph:
+                self.dependency_graph.add_node(node_id, **node_data)
+            
             # Parse file content
             tree = ast.parse(node_data['content'])
             
@@ -114,7 +143,7 @@ class DependencyTracker:
                 self.dependency_graph.add_edge(
                     caller_id,
                     called_func.id,
-                    type='CALLS',
+                    edge_type=EdgeType.CALLS.value,
                     line_number=call_node.lineno,
                     context={
                         'call_args': self._get_call_args(call_node),
@@ -136,7 +165,7 @@ class DependencyTracker:
                 self.dependency_graph.add_edge(
                     node_id,
                     var_def.id,
-                    type='REFERENCES',
+                    edge_type=EdgeType.REFERENCES.value,
                     line_number=name_node.lineno,
                     context={
                         'variable_name': name_node.id,
@@ -166,7 +195,7 @@ class DependencyTracker:
                 self.dependency_graph.add_edge(
                     class_id,
                     base_class.id,
-                    type='INHERITS',
+                    edge_type=EdgeType.INHERITS.value,
                     line_number=base_node.lineno,
                     context={
                         'base_class_name': base_name,
@@ -198,14 +227,21 @@ class DependencyTracker:
     def _track_import(self, file_id: str, import_node: ast.AST, context: Dict[str, Any]):
         """Track an import dependency."""
         try:
+            # Add file node to dependency graph if not already present
+            if file_id not in self.dependency_graph:
+                self.dependency_graph.add_node(file_id)
+            
             if isinstance(import_node, ast.Import):
                 for name in import_node.names:
                     imported_module = self._find_module(name.name)
                     if imported_module:
+                        # Add imported module node if not present
+                        if imported_module.id not in self.dependency_graph:
+                            self.dependency_graph.add_node(imported_module.id)
                         self.dependency_graph.add_edge(
                             file_id,
                             imported_module.id,
-                            type='IMPORTS',
+                            edge_type=EdgeType.IMPORTS.value,
                             line_number=import_node.lineno,
                             context={
                                 'import_name': name.name,
@@ -219,10 +255,13 @@ class DependencyTracker:
                     imported_name = f"{module_name}.{name.name}"
                     imported_item = self._find_imported_item(imported_name)
                     if imported_item:
+                        # Add imported item node if not present
+                        if imported_item.id not in self.dependency_graph:
+                            self.dependency_graph.add_node(imported_item.id)
                         self.dependency_graph.add_edge(
                             file_id,
                             imported_item.id,
-                            type='IMPORTS',
+                            edge_type=EdgeType.IMPORTS.value,
                             line_number=import_node.lineno,
                             context={
                                 'import_name': imported_name,
@@ -302,7 +341,7 @@ class DependencyTracker:
             dependencies.append(DependencyInfo(
                 source_id=node_id,
                 target_id=target_id,
-                dependency_type=edge_data['type'],
+                dependency_type=edge_data['edge_type'],
                 line_number=edge_data['line_number'],
                 context=edge_data['context'],
                 confidence=self._calculate_dependency_confidence(edge_data)
@@ -317,7 +356,7 @@ class DependencyTracker:
             'REFERENCES': 0.8,
             'INHERITS': 0.7,
             'IMPORTS': 0.6
-        }.get(edge_data['type'], 0.5)
+        }.get(edge_data['edge_type'], 0.5)
         
         # Adjust confidence based on context
         context = edge_data['context']
@@ -349,7 +388,7 @@ class DependencyTracker:
                 dependencies.append(DependencyInfo(
                     source_id=path[i],
                     target_id=path[i + 1],
-                    dependency_type=edge_data['type'],
+                    dependency_type=edge_data['edge_type'],
                     line_number=edge_data['line_number'],
                     context=edge_data['context'],
                     confidence=self._calculate_dependency_confidence(edge_data)

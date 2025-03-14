@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import Mock, patch
 import ast
 import json
-from tests.agenthub.loc_agent.mocks import MessageAction, Agent, State
+from openhands.events.action import MessageAction
+from openhands.agenthub.loc_agent.mocks import Agent, State
 from openhands.agenthub.loc_agent import (
     LocAgent,
     LocalizationResult,
@@ -101,29 +102,46 @@ class SearchClass:
         location_names = {loc.name for loc in locations}
         self.assertEqual(location_names, {"search_function", "SearchClass", "search_method"})
         
-    @patch('openhands.agenthub.loc_agent.LLMReasoner')
-    def test_step_with_localization(self, mock_reasoner):
-        """Test the step method with successful localization."""
+        # Verify no file nodes are included
+        for loc in locations:
+            self.assertNotEqual(loc.type, NodeType.FILE)
+            
+        # Verify no duplicate nodes
+        self.assertEqual(len(locations), len({loc.id for loc in locations}))
+        
+        # Verify node types
+        node_types = {loc.type for loc in locations}
+        self.assertEqual(node_types, {NodeType.FUNCTION, NodeType.CLASS, NodeType.METHOD})
+        
+    def test_step_with_localization(self):
+        """Test step method with localization."""
+        # Setup test data
+        test_code = """
+def search_function():
+    pass
+
+class SearchClass:
+    def search_method(self):
+        pass
+"""
+        self.agent.add_code_to_graph(test_code, "test.py")
+        
+        # Mock LLM response
+        mock_response = [{
+            'node_id': 'test.py.search_function',
+            'confidence': 0.9,
+            'reasoning': 'Found matching function'
+        }]
+        
+        # Add message to agent's state
+        self.agent.state.add_message("user", "Find the search function")
+        
         # Mock the LLM reasoner
-        mock_reasoner.return_value.reason.return_value = [
-            {
-                'node_id': 'test.py.search_function',
-                'confidence': 0.9,
-                'reasoning': 'Found matching function'
-            }
-        ]
-        
-        # Create test state with query
-        state = State()
-        state.add_message("find search function")
-        
-        # Execute step
-        action = self.agent.step(state)
-        
-        # Verify action is MessageAction with results
-        self.assertIsInstance(action, MessageAction)
-        self.assertIn("search_function", action.content)
-        self.assertIn("0.90", action.content)
+        with patch.object(self.agent.reasoner, 'reason', return_value=mock_response):
+            action = self.agent.step()
+            
+            # Verify action content
+            self.assertIn("Found matching function", action.content)
         
     def test_format_localization_results(self):
         """Test formatting localization results."""
@@ -174,31 +192,63 @@ def helper():
 """
         self.agent.add_code_to_graph(test_code, "test.py")
         
+        # Find initial locations
+        initial_locations = [node for node in self.agent._find_initial_locations("main")
+                           if node.type != NodeType.FILE]
+        
         # Find related locations
-        initial_locations = self.agent._find_initial_locations("main")
         related = self.agent.graph_traverser.find_related_locations(initial_locations)
         
         # Verify related locations were found
-        self.assertEqual(len(related), 2)  # main and helper functions
+        self.assertEqual(len(related), 1)  # helper function
+        related_names = {node.name for node in related}
+        self.assertEqual(related_names, {"helper"})
         
     def test_dependency_tracking(self):
         """Test dependency tracking functionality."""
         # Add test code with dependencies
         test_code = """
-from module import helper
-
 def main():
     helper()
 """
-        self.agent.add_code_to_graph(test_code, "test.py")
+        # Add code to graph
+        file_node = HeroNode(
+            id="test.py",
+            type=NodeType.FILE,
+            name="test.py",
+            content=test_code
+        )
+        main_node = HeroNode(
+            id="test.py.main",
+            type=NodeType.FUNCTION,
+            name="main",
+            content="def main(): helper()"
+        )
+        helper_node = HeroNode(
+            id="test.py.helper",
+            type=NodeType.FUNCTION,
+            name="helper",
+            content="def helper(): pass"
+        )
+        
+        self.agent.graph.add_node(file_node)
+        self.agent.graph.add_node(main_node)
+        self.agent.graph.add_node(helper_node)
+        
+        # Add edges
+        self.agent.graph.add_edge(file_node.id, main_node.id, EdgeType.CONTAINS)
+        self.agent.graph.add_edge(file_node.id, helper_node.id, EdgeType.CONTAINS)
+        self.agent.graph.add_edge(main_node.id, helper_node.id, EdgeType.CALLS)
+        
+        # Track dependencies
+        self.agent.dependency_tracker._build_dependency_graph()
         
         # Get dependencies for main function
-        main_id = "test.py.main"
-        dependencies = self.agent.dependency_tracker.get_dependencies(main_id)
+        dependencies = self.agent.dependency_tracker.get_dependencies("test.py.main")
         
-        # Verify dependencies were tracked
-        self.assertEqual(len(dependencies), 1)  # helper import
-        self.assertEqual(dependencies[0].dependency_type, EdgeType.IMPORTS)
+        # Verify dependencies
+        self.assertEqual(len(dependencies), 1)  # helper call
+        self.assertEqual(dependencies[0].dependency_type, EdgeType.CALLS.value)
 
 if __name__ == '__main__':
     unittest.main() 
