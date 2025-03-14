@@ -17,6 +17,9 @@
 #modal_api_token_id = ""
 #modal_api_token_secret = ""
 
+# API key for Gemini
+#gemini_api_key = ""
+
 # API key for Daytona
 #daytona_api_key = ""
 
@@ -143,6 +146,7 @@ api_key = ""
 
 # Model to use. (For Headless / CLI only -  In Web this is overridden by Session Init)
 model = "gpt-4o"
+llm_embedding_model = "gemini-embedding-exp-03-07"
 
 # Number of retries to attempt when an operation fails with the LLM.
 # Increase this value to allow more attempts before giving up
