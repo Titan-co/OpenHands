@@ -1,6 +1,7 @@
 import json
 import os
 from collections import deque
+from typing import Optional
 
 import openhands
 import openhands.agenthub.codeact_agent.function_calling as codeact_function_calling
@@ -12,6 +13,7 @@ from openhands.core.message import Message, TextContent
 from openhands.events.action import (
     Action,
     AgentFinishAction,
+    AgentDelegateAction,
 )
 from openhands.llm.llm import LLM
 from openhands.memory.condenser import Condenser
@@ -22,6 +24,7 @@ from openhands.runtime.plugins import (
     PluginRequirement,
 )
 from openhands.utils.prompt import PromptManager
+from openhands.agenthub.loc_agent import LocAgent
 
 
 class CodeActAgent(Agent):
@@ -40,6 +43,7 @@ class CodeActAgent(Agent):
     2. **CodeAct**: Choose to perform the task by executing code
     - Execute any valid Linux `bash` command
     - Execute any valid `Python` code with [an interactive Python interpreter](https://ipython.org/). This is simulated through `bash` command, see plugin system below for more details.
+    3. **Locate**: Delegate code localization tasks to LocAgent for precise code location identification
 
     ![image](https://github.com/All-Hands-AI/OpenHands/assets/38853559/92b622e3-72ad-4a61-8f41-8c040b6d5fb3)
 
@@ -66,6 +70,9 @@ class CodeActAgent(Agent):
         super().__init__(llm, config)
         self.pending_actions: deque[Action] = deque()
         self.reset()
+
+        # Initialize LocAgent for code localization
+        self.loc_agent = LocAgent(llm, config)
 
         # Retrieve the enabled tools
         self.tools = codeact_function_calling.get_tools(
@@ -97,6 +104,8 @@ class CodeActAgent(Agent):
         """Resets the CodeAct Agent."""
         super().reset()
         self.pending_actions.clear()
+        if hasattr(self, 'loc_agent'):
+            self.loc_agent.reset()
 
     def step(self, state: State) -> Action:
         """Performs one step using the CodeAct Agent.
@@ -121,6 +130,10 @@ class CodeActAgent(Agent):
         if latest_user_message and latest_user_message.content.strip() == '/exit':
             return AgentFinishAction()
 
+        # Check if the task requires code localization
+        if self._needs_code_localization(state):
+            return self._delegate_to_loc_agent(state)
+
         # prepare what we want to send to the LLM
         messages = self._get_messages(state)
         params: dict = {
@@ -132,6 +145,60 @@ class CodeActAgent(Agent):
         for action in actions:
             self.pending_actions.append(action)
         return self.pending_actions.popleft()
+
+    def _needs_code_localization(self, state: State) -> bool:
+        """Check if the current task requires code localization.
+        
+        Args:
+            state (State): The current state object
+            
+        Returns:
+            bool: True if code localization is needed, False otherwise
+        """
+        latest_user_message = state.get_last_user_message()
+        if not latest_user_message:
+            return False
+            
+        content = latest_user_message.content.lower()
+        
+        # Keywords indicating code localization is needed
+        localization_keywords = [
+            'find', 'locate', 'where is', 'where to', 'which file',
+            'which function', 'which class', 'code location', 'file location',
+            'function location', 'class location', 'implementation of',
+            'definition of', 'source of', 'code for'
+        ]
+        
+        return any(keyword in content for keyword in localization_keywords)
+
+    def _delegate_to_loc_agent(self, state: State) -> Action:
+        """Delegate the task to LocAgent for code localization.
+        
+        Args:
+            state (State): The current state object
+            
+        Returns:
+            Action: An AgentDelegateAction to delegate to LocAgent
+        """
+        latest_user_message = state.get_last_user_message()
+        if not latest_user_message:
+            return AgentFinishAction()
+            
+        # Create a new state for LocAgent
+        loc_state = State()
+        loc_state.add_message(latest_user_message)
+        
+        # Add relevant context from the current state
+        for event in state.history[-5:]:  # Add last 5 events for context
+            if event.type == 'message':
+                loc_state.add_message(event.message)
+            elif event.type == 'observation':
+                loc_state.add_observation(event.observation)
+                
+        return AgentDelegateAction(
+            agent=self.loc_agent,
+            inputs=loc_state
+        )
 
     def _get_messages(self, state: State) -> list[Message]:
         """Constructs the message history for the LLM conversation.
