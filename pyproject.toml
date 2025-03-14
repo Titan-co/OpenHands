@@ -47,6 +47,9 @@ google-cloud-aiplatform = "*"
 anthropic = {extras = ["vertex"], version = "*"}
 grep-ast = "0.3.3"
 tree-sitter = "^0.24.0"
+tree-sitter-languages = "^1.10.2"  # Added for LocAgent integration
+asttokens = "^2.4.1"  # Added for LocAgent integration
+networkx = "^3.4.2"  # Added for LocAgent integration
 bashlex = "^0.18"
 pyjwt = "^2.9.0"
 dirhash = "*"
