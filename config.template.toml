@@ -18,7 +18,7 @@
 #modal_api_token_secret = ""
 
 # API key for Gemini
-#gemini_api_key = ""
+gemini_api_key = ""
 
 # API key for Daytona
 #daytona_api_key = ""
@@ -242,8 +242,12 @@ codeact_enable_jupyter = true
 enable_history_truncation = true
 
 [agent.RepoExplorerAgent]
-# Example: use a cheaper model for RepoExplorerAgent to reduce cost, especially
-# useful when an agent doesn't demand high quality but uses a lot of tokens
+# Graph-based indexing configuration
+enable_graph_index = true
+graph_relations = ["import", "invoke"]
+max_graph_hops = 3
+
+# LLM configuration 
 llm_config = 'gpt3'
 
 #################################### Sandbox ###################################
